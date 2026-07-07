@@ -94,16 +94,16 @@ def main():
     parser = argparse.ArgumentParser(
         description="ParaHunt: Multi-threaded Parameter Harvester Script",
         epilog="""Examples:
-    py parahunt.py -d scrapethissite.com -t 15
-    py parahunt.py --domain example.com --stealth""",
+  py parahunt.py -d scrapethissite.com -t 15
+  py parahunt.py --domain example.com --stealth""",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    # Mandatory option for the target domain string
+    # Options manual declaration
     parser.add_argument("-d", "--domain", type=str, required=True, help="Target domain to audit (e.g., example.com or localhost:8888)")
     parser.add_argument("-t", "--threads", type=int, default=20, help="Number of concurrent execution threads (default: 20)")
     parser.add_argument("--stealth", action="store_true", help="Enable anti-ban stealth protections (Single-threaded + Random delays)")
-    
+    parser.add_argument("-f", "--format", choices=["report", "raw"], default="report", help="Output file format. 'report' includes decorations/metadata, 'raw' saves URLs only.")
     args = parser.parse_args()
     
     # Clean the input domain text just in case the user accidentally provides http:// or https://
@@ -161,24 +161,26 @@ def main():
     output_filename = f"{safe_filename}_harvested.txt"
     
     with open(output_filename, "w", encoding="utf-8") as f:
-        f.write(f"FINAL REPORT (Sorted by Status Code) - Execution Time: {end_bench - start_bench:.2f} seconds\n")
-        f.write("-" * 100 + "\n")
-        f.write(f"{'CONSTRUCTED DIRECTORY TARGET URL WITH PARAMETER':<65} | {'STATUS':<8} | {'LATENCY':<8}\n")
-        f.write("-" * 100 + "\n")
-        
-        print("\nFINAL REPORT (Sorted by Status Code)")
-        print("-" * 100)
-        print(f"{'CONSTRUCTED DIRECTORY TARGET URL WITH PARAMETER':<65} | {'STATUS':<8} | {'LATENCY':<8}")
-        print("-" * 100)
+        if args.format == "report":
+            # Format 1: Beautiful full visual report (Default)
+            f.write("====================================================================================================\n")
+            f.write(f" PARAHUNT HARVEST REPORT FOR: {target}\n")
+            f.write("====================================================================================================\n")
+            f.write(" Constructed Directory Target URL with parameter                  | status   | latency\n")
+            f.write("----------------------------------------------------------------------------------------------------\n")
+            
+            for res in sorted_results:
+                f.write(f" {res['full_url']} | {res['status_code']} | {res['latency_ms']}ms\n")
+                
+            f.write("----------------------------------------------------------------------------------------------------\n")
+            f.write(f" Total Unique Endpoints Found: {len(sorted_results)}\n")
+            
+        elif args.format == "raw":
+            # Format 2: RAW URLS ONLY (Perfect for piping into MethodFlipper!)
+            for res in sorted_results:
+                f.write(f"{res['full_url']}\n")
 
-        for result in sorted_results:
-            status_display = "ERROR" if result["status_code"] == 999 else str(result["status_code"])
-            latency_display = f"{result['latency_ms']}ms" if result["latency_ms"] > 0 else "N/A"
-            row_text = f"{result['full_url']:<65} | {status_display:<8} | {latency_display:<8}"
-            print(row_text)
-            f.write(row_text + "\n")
-
-    print(f"\n[+] Task complete! Results saved to '{output_filename}'.")
+    print(f"[+] Output successfully saved to {output_filename} in '{args.format}' format!")
 
 if __name__ == "__main__":
     main()
