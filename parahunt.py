@@ -4,10 +4,12 @@ import urllib.parse
 import time
 import argparse
 import random
+import re
+import urllib3
 
-# ==============================================================================
-#                 PARAHUNT v1.2 - BLOCK STYLE ENHANCED
-# ==============================================================================
+# Suppress SSL warnings when interacting with proxies or missing certs
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 print(r"""
 ██████╗  █████╗ ██████╗  █████╗ ██╗  ██╗██╗   ██╗███╗   ██╗████████╗
 ██╔══██╗██╔══██╗██╔══██╗██╔══██╗██║  ██║██║   ██║████╗  ██║╚══██╔══╝
@@ -16,13 +18,17 @@ print(r"""
 ██║     ██║  ██║██║  ██║██║  ██║██║  ██║╚██████╔╝██║ ╚████║   ██║   
 ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   
 
-               >> Passive Archive Crawler & Stealth Endpoint Spider <<
+               >> Enhanced Archive Crawler & JS Endpoint Spider <<
 """)
 
-def fetch_archived_urls(domain):
-    """Queries the Wayback Machine's CDX API to pull historical URLs."""
-    print(f"[*] Extracting historical directory footprints for: {domain}")
-    cdx_url = f"http://web.archive.org/cdx/search/cdx?url={domain}/*&output=json&fl=original&collapse=urlkey"
+def fetch_archived_urls(domain, since_year):
+    """Queries the Wayback Machine's CDX API and filters entries based on the user-defined year."""
+    if since_year == 0:
+        print(f"[*] Querying historical archives (Time-filtering: DISABLED - Fetching ALL history)...")
+    else:
+        print(f"[*] Querying historical archives (Time-filtering: {since_year}-2026)...")
+        
+    cdx_url = f"http://web.archive.org/cdx/search/cdx?url={domain}/*&output=json&fl=original,timestamp&collapse=urlkey"
     
     try:
         response = requests.get(cdx_url, timeout=15)
@@ -34,10 +40,49 @@ def fetch_archived_urls(domain):
         if len(raw_data) <= 1:
             return []
             
-        return [row[0] for row in raw_data[1:]]
+        valid_urls = []
+        for row in raw_data[1:]:
+            url = row[0]
+            timestamp = row[1]  # Format: "YYYYMMDDhhmmss"
+            
+            # If since_year is 0, allow everything. Otherwise, apply the cutoff.
+            if since_year == 0 or int(timestamp[:4]) >= since_year:
+                valid_urls.append(url)
+                
+        return valid_urls
     except Exception as e:
-        print(f"[-] Network connection error gathering archive logs: {e}")
+        print(f"[-] Network error gathering archive logs: {e}")
         return []
+
+def scrape_live_javascript_routes(target_domain, session):
+    """Scrapes the live homepage for scripts to extract client-side frontend application routes."""
+    print(f"[*] Extracting live client-side JavaScript bundles from homepage...")
+    found_routes = set()
+    homepage_url = f"https://{target_domain}"
+    
+    try:
+        res = session.get(homepage_url, timeout=6, verify=False)
+        js_src_urls = re.findall(r'src=["\']([^"\']+\.js)["\']', res.text)
+        
+        for js_url in js_src_urls:
+            if js_url.startswith("//"):
+                js_url = "https:" + js_url
+            elif js_url.startswith("/"):
+                js_url = homepage_url + js_url
+            elif not js_url.startswith("http"):
+                js_url = f"{homepage_url}/{js_url}"
+                
+            try:
+                js_content = session.get(js_url, timeout=4, verify=False).text
+                regex_api_patterns = re.findall(r'["\'](/api/[a-zA-Z0-9_\-/]+)["\']', js_content)
+                for path in regex_api_patterns:
+                    found_routes.add((path, "id"))
+            except requests.RequestException:
+                continue
+    except Exception as e:
+        print(f"[-] Warning: Failed to parse live JS routing map ({e})")
+        
+    return found_routes
 
 def extract_paths_and_parameters(url_list, target_domain):
     """Parses a list of URLs and pairs parameters with their specific target directories."""
@@ -55,7 +100,7 @@ def extract_paths_and_parameters(url_list, target_domain):
             for param_name in params.keys():
                 unique_endpoints.add((path, param_name))
                 
-    return sorted(list(unique_endpoints))
+    return unique_endpoints
 
 def verify_endpoint_behavior(session, target_domain, path, parameter_name, stealth_mode):
     """Worker Function: Evaluates endpoints safely using streaming and conditional stealth delays."""
@@ -71,7 +116,7 @@ def verify_endpoint_behavior(session, target_domain, path, parameter_name, steal
     
     try:
         start = time.time()
-        response = session.get(base_url, params=test_payload, timeout=5, stream=True)
+        response = session.get(base_url, params=test_payload, timeout=5, stream=True, verify=False)
         latency = (time.time() - start) * 1000
         response.close() 
         
@@ -90,93 +135,84 @@ def verify_endpoint_behavior(session, target_domain, path, parameter_name, steal
         }
 
 def main():
-    # === HELP ENGINE ===
     parser = argparse.ArgumentParser(
         description="ParaHunt: Multi-threaded Parameter Harvester Script",
-        epilog="""Examples:
-  py parahunt.py -d scrapethissite.com -t 15
-  py parahunt.py --domain example.com --stealth""",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    # Options manual declaration
-    parser.add_argument("-d", "--domain", type=str, required=True, help="Target domain to audit (e.g., example.com or localhost:8888)")
-    parser.add_argument("-t", "--threads", type=int, default=20, help="Number of concurrent execution threads (default: 20)")
-    parser.add_argument("--stealth", action="store_true", help="Enable anti-ban stealth protections (Single-threaded + Random delays)")
-    parser.add_argument("-f", "--format", choices=["report", "raw"], default="report", help="Output file format. 'report' includes decorations/metadata, 'raw' saves URLs only.")
+    parser.add_argument("-d", "--domain", type=str, required=True, help="Target domain to audit")
+    parser.add_argument("-t", "--threads", type=int, default=20, help="Number of concurrent execution threads")
+    parser.add_argument("--stealth", action="store_true", help="Enable anti-ban stealth protections")
+    parser.add_argument("-f", "--format", choices=["report", "raw"], default="report", help="Output file format.")
+    parser.add_argument("-H", "--header", type=str, help="Pass custom authenticated sessions (e.g., 'Authorization: Bearer <token>')")
+    parser.add_argument("--since", type=int, default=2022, help="Filter out archive URLs older than this year. Set to 0 to fetch entire history.")
     args = parser.parse_args()
     
-    # Clean the input domain text just in case the user accidentally provides http:// or https://
     target = args.domain.replace("https://", "").replace("http://", "").strip("/")
-    
     worker_threads = 1 if args.stealth else args.threads
-    stealth_active = args.stealth
 
-    archived_urls = fetch_archived_urls(target)
-    print(f"[+] Total archived URLs extracted: {len(archived_urls)}")
+    shared_session = requests.Session()
+    shared_session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    })
     
+    if args.header and ":" in args.header:
+        h_key, h_val = args.header.split(":", 1)
+        shared_session.headers.update({h_key.strip(): h_val.strip()})
+        print(f"[🔒] Auth Header Loaded: Injecting custom context to scanner sessions.")
+
+    # 1. Gather Historical Data with dynamic custom year filter
+    archived_urls = fetch_archived_urls(target, args.since)
     endpoint_pairs = extract_paths_and_parameters(archived_urls, target)
-    print(f"[+] Isolated {len(endpoint_pairs)} unique directory-parameter combinations.")
     
-    if not endpoint_pairs:
-        print("[-] No directory query parameters discovered. Try another domain.")
+    # 2. Extract live frontend JS paths
+    live_js_endpoints = scrape_live_javascript_routes(target, shared_session)
+    
+    # Merge datasets together to drop duplications
+    final_endpoint_matrix = endpoint_pairs.union(live_js_endpoints)
+    print(f"[+] Combined Endpoint Catalog: {len(final_endpoint_matrix)} targets isolated.")
+    
+    if not final_endpoint_matrix:
+        print("[-] No valid endpoint patterns identified.")
+        shared_session.close()
         return
 
-    if stealth_active:
-        print("\n[🛡️] STEALTH MODE ACTIVE: Running single-threaded with randomized human-like delays.")
-    else:
-        print(f"\n[*] LOUD MODE: Auditing endpoints concurrently using [{worker_threads}] aggressive workers...")
-        
+    # 3. Active Mapping Sweep
+    print(f"\n[*] Auditing endpoints concurrently using [{worker_threads}] workers...")
     all_results = []
-    start_bench = time.time()
+    
+    adapter = requests.adapters.HTTPAdapter(pool_connections=worker_threads, pool_maxsize=worker_threads)
+    shared_session.mount('https://', adapter)
+    shared_session.mount('http://', adapter)
 
-    with requests.Session() as shared_session:
-        shared_session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
-        })
-
-        adapter = requests.adapters.HTTPAdapter(pool_connections=worker_threads, pool_maxsize=worker_threads)
-        shared_session.mount('https://', adapter)
-        shared_session.mount('http://', adapter)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_threads) as executor:
-            futures = {
-                executor.submit(verify_endpoint_behavior, shared_session, target, path, param, stealth_active): (path, param) 
-                for path, param in endpoint_pairs
-            }
-            
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                all_results.append(result)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_threads) as executor:
+        futures = {
+            executor.submit(verify_endpoint_behavior, shared_session, target, path, param, args.stealth): (path, param) 
+            for path, param in final_endpoint_matrix
+        }
+        for future in concurrent.futures.as_completed(futures):
+            all_results.append(future.result())
 
     sorted_results = sorted(all_results, key=lambda x: x["status_code"])
-    end_bench = time.time()
+    shared_session.close()
 
-    # Dynamic filename cleanup for Windows-safe names if ports are used (like localhost:8888)
+    # 4. Save Clean Manifest
     safe_filename = target.replace(":", "_")
     output_filename = f"{safe_filename}_harvested.txt"
     
     with open(output_filename, "w", encoding="utf-8") as f:
         if args.format == "report":
-            # Format 1: Beautiful full visual report (Default)
             f.write("====================================================================================================\n")
             f.write(f" PARAHUNT HARVEST REPORT FOR: {target}\n")
             f.write("====================================================================================================\n")
             f.write(" Constructed Directory Target URL with parameter                  | status   | latency\n")
             f.write("----------------------------------------------------------------------------------------------------\n")
-            
             for res in sorted_results:
                 f.write(f" {res['full_url']} | {res['status_code']} | {res['latency_ms']}ms\n")
-                
             f.write("----------------------------------------------------------------------------------------------------\n")
             f.write(f" Total Unique Endpoints Found: {len(sorted_results)}\n")
-            
         elif args.format == "raw":
-            # Format 2: RAW URLS ONLY (Perfect for piping into MethodFlipper!)
             for res in sorted_results:
                 f.write(f"{res['full_url']}\n")
 
